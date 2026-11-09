@@ -1,0 +1,40 @@
+name: Autograding cv06
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MARIADB_ROOT_PASSWORD: root
+          MARIADB_DATABASE: test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+          tools: composer
+      - name: Install
+        run: composer install --no-interaction --quiet
+      - name: Database
+        run: |
+          mysql -h 127.0.0.1 -uroot -proot test < sql/schema.sql
+          mysql -h 127.0.0.1 -uroot -proot test < sql/seed.sql
+      - name: Config
+        run: |
+          cat > config.php <<'PHP'
+          <?php
+          return ['host' => '127.0.0.1', 'dbname' => 'test', 'user' => 'root', 'pass' => 'root', 'debug' => true];
+          PHP
+      - name: Tests (100 points)
+        run: php tests/test.php
