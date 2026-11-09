@@ -1,13 +1,13 @@
 <?php
-// Autograder cv06: 10 kontrol × 10 bodov. Spúšťa sa v GitHub Actions (.github/workflows/classroom.yml) alebo lokálne: php tests/test.php
+// Autograder cv07: 10 kontrol × 10 bodov. Spúšťa sa v GitHub Actions (.github/workflows/classroom.yml) alebo lokálne: php tests/test.php
 declare(strict_types=1);
 
 $root = dirname(__DIR__);
-$prefix = '/student/test.user/it/cv06';
+$prefix = '/student/test.user/it/cv07';
 $port = 8765;
 $score = 0;
 $results = [];
-$cookies = [];     // cookie jar: to, čo server poslal v Set-Cookie, ide v ďalších požiadavkách späť v hlavičke Cookie (ako prehliadač)
+$cookies = [];
 
 function check(string $name, bool $ok, string $hint = ''): void
 {
@@ -16,7 +16,7 @@ function check(string $name, bool $ok, string $hint = ''): void
     $results[] = sprintf('%s %s%s', $ok ? '✔' : '✘', $name, $ok || $hint === '' ? '' : "  → $hint");
 }
 
-/** HTTP požiadavka na php -S; vráti [stavový kód, telo, hlavičky]. Presmerovanie nesleduje. Cookies si pamätá v $cookies. */
+/** HTTP požiadavka na php -S; vráti [stavový kód, telo, hlavičky]. Cookies si pamätá v $cookies (cookie jar ako prehliadač). */
 function req(string $method, string $path, array $data = [], bool $withCookies = true): array
 {
     global $prefix, $port, $cookies;
@@ -63,6 +63,13 @@ function get(string $path, bool $withCookies = true): array
     return req('GET', $path, [], $withCookies);
 }
 
+/** Vytiahne CSRF token zo skrytého inputu na stránke $path (zavolá GET, aby token vznikol a cookie sa uložila). */
+function csrf(string $path): string
+{
+    [, $html] = get($path);
+    return preg_match('/name=["\']csrf["\']\s+value=["\']([^"\']+)["\']/', $html, $m) ? $m[1] : '';
+}
+
 function hasForm(string $html): bool
 {
     return (bool) preg_match('/<form\b[^>]*method=["\']post["\']/i', $html);
@@ -70,85 +77,93 @@ function hasForm(string $html): bool
 
 // --- statické kontroly súborov -------------------------------------------------
 $schema = @file_get_contents("$root/sql/schema.sql") ?: '';
-check('sql/schema.sql: CREATE TABLE users s username UNIQUE a password_hash',
-    preg_match('/CREATE\s+TABLE\s+`?users`?/i', $schema) && preg_match('/username[^,]*UNIQUE|UNIQUE[^,]*\(\s*`?username`?\s*\)/i', $schema) && str_contains($schema, 'password_hash'),
-    'tabuľka users (id, username UNIQUE, password_hash, created_at) v sql/schema.sql (úloha 7.2)');
+check('sql/schema.sql: users.role a user_id v hlavnej entite s FOREIGN KEY na users',
+    preg_match('/\brole\b/', $schema) && preg_match('/\buser_id\b/', $schema)
+        && preg_match('/FOREIGN\s+KEY\s*\(\s*`?user_id`?\s*\)\s*REFERENCES\s+`?users`?/i', $schema),
+    'stĺpec users.role, stĺpec user_id v tabuľke hlavnej entity a FOREIGN KEY (user_id) REFERENCES users(id) (úlohy 8.1, 8.2)');
 
-$um = @file_get_contents("$root/src/Model/UserModel.php") ?: '';
-check('src/Model/UserModel.php: findByUsername() a insert()',
-    str_contains($um, 'function findByUsername(') && str_contains($um, 'function insert(') && str_contains($um, 'password_hash'),
-    'UserModel s metódami findByUsername(string $username): ?array a insert(string $username, string $passwordHash): int (úloha 7.3)');
+$base = @file_get_contents("$root/src/Controller/BaseController.php") ?: '';
+check('src/Controller/BaseController.php: requireLogin() a authorize()',
+    preg_match('/function\s+requireLogin\s*\(/', $base) && preg_match('/function\s+authorize\s*\(/', $base),
+    'metódy requireLogin(): ?Response a authorize(array $record): ?Response v BaseController (úloha 8.3)');
+
+// Controller hlavnej entity = súbor, ktorý má metódu edit()
+$mainCtrl = '';
+foreach (glob("$root/src/Controller/*.php") as $f) {
+    $c = (string) file_get_contents($f);
+    if (preg_match('/function\s+edit\s*\(/', $c)) {
+        $mainCtrl = $c;
+        break;
+    }
+}
+check('Controller hlavnej entity: edit(), update() a delete()',
+    $mainCtrl !== '' && preg_match('/function\s+update\s*\(/', $mainCtrl) && preg_match('/function\s+delete\s*\(/', $mainCtrl),
+    'metódy edit(), update() a delete() v controlleri hlavnej entity (úloha 8.4)');
 
 $ix = @file_get_contents("$root/index.php") ?: '';
-$pair = '\[\s*\\\\?[A-Za-z0-9_\\\\]+::class\s*,\s*[\'"][a-zA-Z_][a-zA-Z0-9_]*[\'"]\s*\]';
-$route = fn(string $m, string $p): bool => (bool) preg_match('/->' . $m . '\(\s*[\'"]' . preg_quote($p, '/') . '[\'"]\s*,\s*' . $pair . '/', $ix);
-check('index.php: session_start() a päť route: GET+POST /register, GET+POST /login, POST /logout',
-    str_contains($ix, 'session_start()') && $route('get', '/register') && $route('post', '/register') && $route('get', '/login') && $route('post', '/login') && $route('post', '/logout'),
-    'session_start() pred Request::fromGlobals(); route podľa stránky predmetu (úlohy 7.1, 7.4)');
+$posParams = strpos($ix, 'session_set_cookie_params');
+$posReq    = strpos($ix, 'Request::fromGlobals');
+check('index.php: session_set_cookie_params s path za Request::fromGlobals(), route edit/update/delete',
+    $posParams !== false && preg_match('/[\'"]path[\'"]\s*=>/', $ix)
+        && $posReq !== false && $posParams > $posReq
+        && preg_match('#\{id\}/edit#', $ix) && preg_match('#\{id\}/delete#', $ix),
+    'session_set_cookie_params([...path...]) a session_start() AŽ ZA Request::fromGlobals(); route .../{id}/edit a .../{id}/delete (úlohy 8.1, 8.4, cookie session)');
 
-$ac = @file_get_contents("$root/src/Controller/AuthController.php") ?: '';
-check('src/Controller/AuthController.php: password_hash(), password_verify(), Auth::login() a Auth::logout()',
-    str_contains($ac, 'password_hash(') && str_contains($ac, 'password_verify(') && str_contains($ac, 'Auth::login(') && str_contains($ac, 'Auth::logout('),
-    'AuthController podľa stránky predmetu (úloha 7.4)');
+$csrfFile = @file_get_contents("$root/src/Csrf.php") ?: '';
+check('src/Csrf.php: token() a check()',
+    preg_match('/function\s+token\s*\(/', $csrfFile) && preg_match('/function\s+check\s*\(/', $csrfFile),
+    'trieda Csrf so static metódami token() a check() (zo súborov bezpecnost.zip)');
 
-$au = @file_get_contents("$root/src/Auth.php") ?: '';
-$hp = @file_get_contents("$root/src/helpers.php") ?: '';
-check('src/Auth.php a src/helpers.php zo session.zip (Auth::check(), addGlobal user a flash)',
-    str_contains($au, 'function check(') && str_contains($au, "\$_SESSION['user_id']") && preg_match('/addGlobal\(\s*[\'"]user[\'"]/', $hp) && preg_match('/addGlobal\(\s*[\'"]flash[\'"]/', $hp),
-    'rozbaľ session.zip v priečinku projektu (úloha 7.1)');
+$router  = @file_get_contents("$root/src/Router.php") ?: '';
+$helpers = @file_get_contents("$root/src/helpers.php") ?: '';
+check('src/Router.php kontroluje CSRF token pri POST; src/helpers.php má csrf_field()',
+    str_contains($router, 'Csrf') && str_contains($helpers, 'csrf_field'),
+    'Router pri POST volá Csrf::check(); helpers.php registruje Twig funkciu csrf_field() (zo súborov bezpecnost.zip)');
+
+$auth = @file_get_contents("$root/src/Auth.php") ?: '';
+$ac   = @file_get_contents("$root/src/Controller/AuthController.php") ?: '';
+check('src/Auth.php: session_regenerate_id(); AuthController: pravidlo pre heslo (8 znakov)',
+    str_contains($auth, 'session_regenerate_id') && preg_match('/mb_strlen|strlen/', $ac) && str_contains($ac, 'password2'),
+    'session_regenerate_id(true) v Auth::login(); v register() kontrola dĺžky hesla a pole password2 (úlohy 8.1, 8.4)');
 
 // --- HTTP kontroly cez php -S ----------------------------------------------------
 $cmd = sprintf('php -S 127.0.0.1:%d %s > /dev/null 2>&1 & echo $!', $port, escapeshellarg("$root/tests/router.php"));
 $pid = (int) trim((string) shell_exec($cmd));
-usleep(700000);
+usleep(800000);
 
-preg_match_all('/->get\(\s*[\'"]([^\'"]+\/new)[\'"]\s*,\s*' . $pair . '/', $ix, $nm);
-$newPath = $nm[1][0] ?? '/recipes/new';
+// discover main entity base path from the edit route '/X/{id}/edit'
+$entity = preg_match('#[\'"](/[a-z0-9_\-]+)/\{id\}/edit[\'"]#i', $ix, $m) ? $m[1] : '/recipes';
+$newPath = preg_match('#->get\(\s*[\'"](/[a-z0-9_\-]+/new)[\'"]#i', $ix, $mm) ? $mm[1] : $entity . '/new';
 
 [$s, $b, $h] = get('/', false);
-$hasCookie = false;
-foreach ($h['set-cookie'] ?? [] as $c) {
-    if (str_starts_with($c, 'PHPSESSID=')) {
-        $hasCookie = true;
-    }
+$setCookie = implode(' ', $h['set-cookie'] ?? []);
+check('GET / → 200, Set-Cookie PHPSESSID s path (nie iba /) a SameSite',
+    $s === 200 && preg_match('/PHPSESSID=/', $setCookie)
+        && preg_match('#path=/[^;\s]+#', $setCookie) && !preg_match('#path=/;#', $setCookie . ';')
+        && stripos($setCookie, 'samesite') !== false,
+    "stavový kód $s; session_set_cookie_params nastavuje path na prefix a samesite; cookie: " . ($setCookie ?: '(žiadna)'));
+
+[$s] = req('POST', '/login', ['username' => 'x', 'password' => 'y']);   // bez CSRF tokenu
+check('POST /login bez CSRF tokenu → 403',
+    $s === 403,
+    "stavový kód $s; Router má pri každom POST bez platného tokenu vrátiť 403 (bezpecnost.zip: Router + Csrf)");
+
+// plný tok: register (slabé heslo → formulár), register OK, login, GET entita/new → 200
+$user = 'ag' . random_int(10000, 99999);
+$t1 = csrf('/register');
+[$sWeak, $bWeak] = req('POST', '/register', ['username' => $user, 'password' => 'abc', 'password2' => 'abc', 'csrf' => $t1]);
+$t2 = csrf('/register');
+[$sReg, , $hReg] = req('POST', '/register', ['username' => $user, 'password' => 'Heslo1234', 'password2' => 'Heslo1234', 'csrf' => $t2]);
+$okReg = $sWeak === 200 && hasForm($bWeak) && $sReg === 302;
+$why = "slabé heslo → $sWeak (má byť 200 s formulárom), platná registrácia → $sReg (má byť 302)";
+if ($okReg) {
+    $t3 = csrf('/login');
+    [$sLog, , $hLog] = req('POST', '/login', ['username' => $user, 'password' => 'Heslo1234', 'csrf' => $t3]);
+    [$sNew, $bNew] = get($newPath);
+    $okReg = $sLog === 302 && $sNew === 200 && hasForm($bNew);
+    $why = "login → $sLog (302), GET $newPath po prihlásení → $sNew (200 s formulárom)";
 }
-check('GET / → 200, odpoveď má Set-Cookie: PHPSESSID a menu má odkaz na /login',
-    $s === 200 && $hasCookie && str_contains($b, url('/login')),
-    "stavový kód $s; session_start() v index.php; v layout.twig odkaz {{ url('/login') }} pre neprihláseného (úlohy 7.1, 7.5)");
-
-[$s, $b, $h] = get($newPath);
-$loc = $h['location'] ?? '';
-check("GET $newPath bez prihlásenia → 302 na /login",
-    $s === 302 && str_ends_with($loc, '/login'),
-    "stavový kód $s, Location: " . ($loc ?: '(žiadna)') . '; create() má bez prihlásenia vrátiť Response::redirect(\'/login\') (úloha 7.6)');
-
-$user = 'autograder' . random_int(10000, 99999);
-$pass = 'Heslo' . random_int(1000, 9999);
-[$s, $b] = get('/register');
-$formOk = $s === 200 && hasForm($b) && preg_match('/name=["\']username["\']/', $b) && preg_match('/type=["\']password["\'][^>]*name=["\']password["\']|name=["\']password["\'][^>]*type=["\']password["\']/', $b);
-[$s2, $b2, $h2] = req('POST', '/register', ['username' => $user, 'password' => $pass]);
-$loc2 = $h2['location'] ?? '';
-check('GET /register → 200 s formulárom (username, password); POST /register nový používateľ → 302 na /login',
-    $formOk && $s2 === 302 && str_ends_with($loc2, '/login'),
-    "GET /register → $s; POST /register → $s2, Location: " . ($loc2 ?: '(žiadna)') . '; register() má po insert() vrátiť Response::redirect(\'/login\') (úloha 7.4)');
-
-[$s, $b] = req('POST', '/register', ['username' => $user, 'password' => $pass]);
-[$s2, $b2] = req('POST', '/login', ['username' => $user, 'password' => 'zle-' . $pass]);
-check('POST /register s obsadeným menom → 200 a formulár s hláškou; POST /login so zlým heslom → 200 a formulár s hláškou',
-    $s === 200 && hasForm($b) && $s2 === 200 && hasForm($b2),
-    "obsadené meno → $s; zlé heslo → $s2; obe majú vrátiť formulár znova (200), nie 302 ani 500 (úloha 7.4)");
-
-[$s, $b, $h] = req('POST', '/login', ['username' => $user, 'password' => $pass]);
-$loc = $h['location'] ?? '';
-$ok = $s === 302;
-$why = "POST /login so správnym heslom → stavový kód $s; login() má po Auth::login() vrátiť Response::redirect('/')";
-if ($ok) {
-    [$s2, $b2] = get('/');
-    [$s3, $b3] = get($newPath);
-    $ok = $s2 === 200 && str_contains($b2, $user) && str_contains($b2, url('/logout')) && $s3 === 200 && hasForm($b3);
-    $why = "po prihlásení GET / → $s2 (má obsahovať meno $user a formulár na /logout), GET $newPath → $s3 (má byť 200 s formulárom) (úlohy 7.5, 7.6)";
-}
-check('POST /login správne → 302; potom GET / ukazuje meno a tlačidlo Odhlásiť; GET /entita/new → 200 s formulárom', $ok, $ok ? '' : $why);
+check('Registrácia (slabé heslo → formulár; platné → 302), prihlásenie s CSRF tokenom, formulár len pre prihláseného', $okReg, $okReg ? '' : $why);
 
 if ($pid) {
     exec("kill $pid 2>/dev/null");
@@ -156,9 +171,3 @@ if ($pid) {
 
 echo implode("\n", $results), "\n\n", "Body: $score / 100\n";
 exit($score === 100 ? 0 : 1);
-
-function url(string $path): string
-{
-    global $prefix;
-    return $prefix . $path;
-}
